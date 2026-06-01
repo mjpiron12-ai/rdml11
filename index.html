@@ -183,6 +183,71 @@ footer{border-top:1px solid var(--line);padding:24px 0;display:flex;align-items:
 .footer-link{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--moss);text-decoration:none;letter-spacing:.04em;transition:color .2s}
 .footer-link:hover{color:var(--moss-2)}
 
+
+/* ── RENDERED MARKDOWN IN CHAT ── */
+.msg-bubble h2{
+  font-family:'Cormorant Garamond',serif;
+  font-size:18px;font-weight:400;letter-spacing:-.01em;
+  color:var(--ink);margin:16px 0 6px;padding-bottom:4px;
+  border-bottom:1px solid var(--line);
+}
+.msg-bubble h2:first-child{margin-top:0}
+.msg-bubble strong{font-weight:600;color:var(--ink)}
+.msg-bubble em{font-style:italic;color:var(--ink-2)}
+.msg-bubble ul,.msg-bubble ol{
+  padding-left:18px;margin:6px 0;
+}
+.msg-bubble li{
+  margin-bottom:4px;font-size:14px;line-height:1.6;
+}
+.msg-bubble p{margin:6px 0;font-size:14px;line-height:1.65}
+.msg-bubble a{
+  color:var(--moss);text-decoration:underline;
+  text-decoration-color:rgba(29,158,117,.4);
+  text-underline-offset:2px;transition:color .2s;
+}
+.msg-bubble a:hover{color:var(--moss-2)}
+
+/* Scorecard items */
+.score-row{
+  display:flex;align-items:baseline;gap:8px;
+  padding:5px 0;border-bottom:1px solid var(--line);
+  font-size:13px;
+}
+.score-row:last-child{border-bottom:none}
+.score-label{flex:1;color:var(--ink-2)}
+.score-val{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:12px;font-weight:500;
+}
+.score-val.high{color:#1D9E75}
+.score-val.mid{color:#B87333}
+.score-val.low{color:#C44B2B}
+.score-bar{
+  width:60px;height:4px;border-radius:2px;
+  background:var(--line-2);overflow:hidden;flex-shrink:0;
+}
+.score-bar-fill{height:100%;border-radius:2px;transition:width .5s}
+
+/* Action buttons below assistant message */
+.msg-actions{
+  display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;
+}
+.msg-action-btn{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:5px 12px;border-radius:100px;
+  border:1px solid var(--line-2);background:rgba(255,255,255,.5);
+  font-family:'IBM Plex Mono',monospace;font-size:9px;
+  letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-3);cursor:pointer;
+  transition:background .2s,color .2s,border-color .2s;
+}
+.msg-action-btn:hover{
+  background:rgba(255,255,255,.9);
+  color:var(--ink);border-color:var(--line-2);
+}
+.msg-action-btn.copied{color:var(--moss);border-color:var(--moss)}
+
 /* REVEAL */
 .reveal{opacity:0;transform:translateY(28px);transition:opacity .8s cubic-bezier(.19,1,.22,1),transform .8s cubic-bezier(.19,1,.22,1)}
 .reveal.in{opacity:1;transform:none}
@@ -373,15 +438,155 @@ function sendStarter(btn) {
   sendMessage();
 }
 
+/* ── MARKDOWN RENDERER ── */
+function renderMarkdown(text) {
+  // Escape HTML first
+  let html = text
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+
+  // Process line by line for structure
+  const lines = html.split('\n');
+  let out = '';
+  let inUl = false, inOl = false, inScorecard = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+
+    // Scorecard lines: "Label — N/10 — description"
+    const scoreMatch = line.match(/^(Visual Hierarchy|Clarity|Trust|Cognitive Load|Conversion Readiness|Design Coherence)\s*[—–-]+\s*(\d+)\/10\s*[—–-]+\s*(.*)$/);
+    if (scoreMatch) {
+      if (inUl) { out += '</ul>'; inUl = false; }
+      if (inOl) { out += '</ol>'; inOl = false; }
+      const score = parseInt(scoreMatch[2]);
+      const cls = score >= 7 ? 'high' : score >= 4 ? 'mid' : 'low';
+      const pct = (score / 10) * 100;
+      const color = score >= 7 ? '#1D9E75' : score >= 4 ? '#B87333' : '#C44B2B';
+      out += `<div class="score-row">
+        <span class="score-label"><strong>${scoreMatch[1]}</strong></span>
+        <span class="score-val ${cls}">${scoreMatch[2]}/10</span>
+        <div class="score-bar"><div class="score-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      </div><p style="font-size:12px;color:var(--ink-3);margin:2px 0 8px;padding-left:2px">${renderInline(scoreMatch[3])}</p>`;
+      continue;
+    }
+
+    // ## Heading
+    if (line.match(/^##\s+/)) {
+      if (inUl) { out += '</ul>'; inUl = false; }
+      if (inOl) { out += '</ol>'; inOl = false; }
+      out += `<h2>${renderInline(line.replace(/^##\s+/, ''))}</h2>`;
+      continue;
+    }
+
+    // Bullet list
+    if (line.match(/^[-*]\s+/)) {
+      if (inOl) { out += '</ol>'; inOl = false; }
+      if (!inUl) { out += '<ul>'; inUl = true; }
+      out += `<li>${renderInline(line.replace(/^[-*]\s+/, ''))}</li>`;
+      continue;
+    }
+
+    // Numbered list
+    if (line.match(/^\d+\.\s+/)) {
+      if (inUl) { out += '</ul>'; inUl = false; }
+      if (!inOl) { out += '<ol>'; inOl = true; }
+      out += `<li>${renderInline(line.replace(/^\d+\.\s+/, ''))}</li>`;
+      continue;
+    }
+
+    // Close lists on empty line
+    if (line.trim() === '') {
+      if (inUl) { out += '</ul>'; inUl = false; }
+      if (inOl) { out += '</ol>'; inOl = false; }
+      out += '<br>';
+      continue;
+    }
+
+    // Paragraph
+    if (inUl) { out += '</ul>'; inUl = false; }
+    if (inOl) { out += '</ol>'; inOl = false; }
+    out += `<p>${renderInline(line)}</p>`;
+  }
+
+  if (inUl) out += '</ul>';
+  if (inOl) out += '</ol>';
+  return out;
+}
+
+function renderInline(text) {
+  return text
+    // Bold
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    // Italic
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    // Auto-link morphline11.io
+    .replace(/(morphline11\.io)/g, '<a href="https://morphline11.io" target="_blank">$1</a>')
+    .replace(/(rdml11\.vercel\.app)/g, '<a href="https://rdml11.vercel.app" target="_blank">$1</a>')
+    // Generic URLs
+    .replace(/(?<![">])(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+}
+
+/* ── COPY TO CLIPBOARD ── */
+function copyOutput(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = '✓ Copied';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copy';
+      btn.classList.remove('copied');
+    }, 2000);
+  });
+}
+
+/* ── DOWNLOAD AS MD ── */
+function downloadOutput(text) {
+  const blob = new Blob([text], {type: 'text/markdown'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'lyra-critique-' + Date.now() + '.md';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ── SHARE ── */
+function shareOutput(text) {
+  if (navigator.share) {
+    navigator.share({
+      title: 'Lyra Design Critique',
+      text: text.slice(0, 200) + '...',
+      url: 'https://rdml11.vercel.app'
+    });
+  } else {
+    navigator.clipboard.writeText('https://rdml11.vercel.app');
+    alert('Link copied: rdml11.vercel.app');
+  }
+}
+
 /* ── APPEND MESSAGE TO UI ── */
 function appendMessage(role, text) {
   const container = document.getElementById('chat-messages');
   const div = document.createElement('div');
   div.className = `msg ${role}`;
-  div.innerHTML = `
-    <span class="msg-label">${role === 'user' ? 'You' : 'Lyra'}</span>
-    <div class="msg-bubble">${text.replace(/\n/g,'<br>')}</div>
-  `;
+
+  if (role === 'assistant') {
+    const rendered = renderMarkdown(text);
+    div.innerHTML = `
+      <span class="msg-label">Lyra</span>
+      <div class="msg-bubble">${rendered}</div>
+      <div class="msg-actions">
+        <button class="msg-action-btn" onclick="copyOutput(this, ${JSON.stringify(text)})">Copy</button>
+        <button class="msg-action-btn" onclick="downloadOutput(${JSON.stringify(text)})">Download</button>
+        <button class="msg-action-btn" onclick="shareOutput(${JSON.stringify(text)})">Share</button>
+      </div>
+    `;
+  } else {
+    div.innerHTML = `
+      <span class="msg-label">You</span>
+      <div class="msg-bubble">${text.replace(/\n/g,'<br>')}</div>
+    `;
+  }
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
