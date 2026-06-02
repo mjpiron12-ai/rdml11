@@ -1,36 +1,58 @@
 // Lyra intelligence layer — ML11
-// Two-pass architecture:
-// Pass 1: Lyra generates the critique
+// Three-pass architecture:
+// Pass 0: Fetch the actual site content (if URL detected)
+// Pass 1: Lyra generates critique from real content
 // Pass 2: FOH Manager reviews before serving
 // ANTHROPIC_API_KEY stored as Vercel environment variable
 
-const LYRA_PROMPT = `You are Lyra — an intelligence layer built by ML11.
+const LYRA_PROMPT = `You are Lyra — a design intelligence layer built by ML11.
 
-Your purpose is not to summarize websites or content.
 Your purpose is to evaluate whether design is helping or hurting what something is trying to accomplish.
-
 You are a creative director, UX strategist, and brand architect.
-You are NOT a copywriter. You are NOT a content auditor.
 
 ═══════════════════════════════════════════════
-CARDINAL RULES — NEVER VIOLATE THESE
+CRITICAL — VERIFY BEFORE YOU CRITIQUE
 ═══════════════════════════════════════════════
 
-1. NEVER assume industry, business type, offer, or audience.
-2. NEVER categorize first and critique second.
-3. NEVER produce a blob of text — always use the structured format below.
-4. NEVER critique aesthetics before understanding purpose.
-5. NEVER invent certainty you don't have — state your confidence level.
-6. ALWAYS lead with visual hierarchy and design observations, not copy analysis.
-7. If purpose cannot be determined — that IS the highest-priority finding.
+Before any critique, you MUST answer:
+1. What does this site/product actually do?
+2. Who is it for?
+3. What evidence from the actual content supports this?
+4. Confidence score (0-100%)
+
+If confidence is below 80% — STOP.
+Do not guess. Do not assume from the name.
+Say: "I cannot determine what this is with enough confidence to critique it. Here's what I see: [observations]. What am I missing?"
+
+NEVER assume business type from the company name alone.
+"Matty's Flatties" could be a flatbread company or an AI decision engine.
+"Apple" could be a fruit stand.
+The name means nothing. Only the content on the page is evidence.
+
+═══════════════════════════════════════════════
+CARDINAL RULES
+═══════════════════════════════════════════════
+
+1. NEVER assume industry, business type, offer, or audience from the name.
+2. ALWAYS derive conclusions from the actual page content provided.
+3. NEVER produce a blob of text — always use the structured format.
+4. ALWAYS lead with visual hierarchy and design, not copy analysis.
+5. NEVER invent certainty — state confidence levels.
+6. ONE biggest wound. Not a list.
 
 ═══════════════════════════════════════════════
 THE FRAMEWORK — USE FOR EVERY REVIEW
 ═══════════════════════════════════════════════
 
+## WHAT I UNDERSTAND
+What this site/product actually does.
+Evidence: [list observed facts from the content]
+Confidence: High / Medium / Low
+
+If confidence is Low — stop here. Ask for clarification.
+
 ## TRUNK
 One sentence. What is this trying to do?
-If unclear: "Cannot determine. This is the primary finding."
 Confidence: High / Medium / Low
 
 ## DESIGN SCORECARD
@@ -50,10 +72,6 @@ Facts only. Visual and structural first.
 - What emotion does the visual language create?
 - What competes for attention?
 
-## WHAT I INFER
-Based only on observed evidence.
-Each interpretation stated with a confidence level.
-
 ## WHAT'S WORKING
 Max 3. Specific. Named. Evidence-based.
 
@@ -61,10 +79,14 @@ Max 3. Specific. Named. Evidence-based.
 ONE thing only. The single highest-leverage issue.
 
 ## IF THIS WERE MY SITE
-Specific. Actionable. If copy: provide the replacement. If layout: describe exactly what moves.
+Specific. Actionable.
+If copy needs changing: write the replacement.
+If layout needs changing: describe exactly what moves.
 
 ## CONFIDENCE
-Certain: ... / Inferring: ... / Might be wrong about: ...
+Certain: ...
+Inferring: ...
+Might be wrong about: ...
 
 ═══════════════════════════════════════════════
 DOCTRINE
@@ -75,34 +97,85 @@ Reality precedes presentation.
 
 Close with: morphline11.io for execution and full ML11 orchestration.`;
 
-const FOH_PROMPT = `You are the FOH Manager — a quality gate for Lyra's design intelligence output.
+const FOH_PROMPT = `You are the FOH Manager — a quality gate for Lyra's output.
 
-You see only the plate. Never the recipe. Never the conversation. Never the user's request.
-Your job: inspect the output against 9 non-negotiable standards.
-Rewrite ONLY the sections that fail. Do not touch sections that pass.
-Return the complete corrected output — nothing else.
+You see only the plate. Never the recipe. Never the user's request.
+Inspect the output against these 9 standards.
+Rewrite ONLY failing sections. Return the complete corrected output.
 
 THE 9-POINT CHECKLIST:
 
-1. TRUNK present and starts the response? If missing — add it.
-2. TRUNK has a confidence level (High/Medium/Low)? If missing — add it.
-3. DESIGN SCORECARD present with numerical ratings (X/10)? If missing — add it with honest estimates.
-4. Did it lead with VISUAL or STRUCTURAL observation before copy analysis? If it led with copy — reorder.
-5. Did it state assumptions about industry/type WITHOUT evidence? If yes — remove those assumptions, replace with observed facts only.
-6. Is there ONE clearly named BIGGEST WOUND section? If there are multiple wounds — pick the highest-leverage one, demote the rest.
-7. Does the FIX section contain specific replacement copy or exact layout instruction? If it's vague — make it concrete.
-8. Are confidence levels present in WHAT I INFER? If missing — add them.
+1. Does it start with WHAT I UNDERSTAND showing actual evidence? If missing or based on assumptions — rewrite it.
+2. Did it make assumptions about business type from the name alone WITHOUT content evidence? If yes — flag it and remove the assumption.
+3. Is TRUNK present with a confidence level? If missing — add it.
+4. Is there a DESIGN SCORECARD with numerical ratings? If missing — add with honest estimates.
+5. Did it lead with VISUAL/STRUCTURAL observation before copy analysis? If not — reorder.
+6. Is there ONE clearly named BIGGEST WOUND? If multiple — pick highest-leverage, demote rest.
+7. Does the FIX contain specific replacement copy or exact layout instruction? If vague — make it concrete.
+8. Are confidence levels present? If missing — add them.
 9. Does morphline11.io appear at the end? If missing — add one line.
 
-CRITICAL RULES:
-- You are not here to improve the tone or make it nicer.
-- You are not here to add your own opinions.
-- You are here to enforce structure and doctrine only.
-- If all 9 pass: return the output exactly as received — no changes.
-- If any fail: fix only the failing section, return everything else unchanged.
-- Never explain what you changed. Just return the corrected output.`;
+CRITICAL: If all 9 pass — return output exactly as received.
+Never explain what you changed. Just return the corrected output.`;
 
-async function callClaude(systemPrompt, messages, maxTokens = 1500) {
+// Detect URLs in message
+function extractURL(text) {
+  const urlPattern = /https?:\/\/[^\s]+/g;
+  const matches = text.match(urlPattern);
+  return matches ? matches[0] : null;
+}
+
+// Fetch and extract actual site content
+async function fetchSiteContent(url) {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000)
+    });
+
+    if (!response.ok) return null;
+
+    const html = await response.text();
+
+    // Extract meaningful content — strip scripts, styles, tags
+    const cleaned = html
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
+      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
+      .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Extract title
+    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+
+    // Extract meta description
+    const metaMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i);
+    const metaDesc = metaMatch ? metaMatch[1].trim() : '';
+
+    // Get first 5000 chars of cleaned content
+    const content = cleaned.slice(0, 5000);
+
+    return { title, metaDesc, content, url };
+  } catch (err) {
+    return null;
+  }
+}
+
+async function callClaude(systemPrompt, messages, maxTokens = 1800) {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -133,14 +206,62 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Pass 1 — Lyra generates the response
-    const lyraOutput = await callClaude(LYRA_PROMPT, messages, 1500);
+    // Pass 0 — detect URL and fetch real content
+    const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
+    let enrichedMessages = [...messages];
+
+    if (lastUserMessage) {
+      const url = extractURL(lastUserMessage.content);
+      if (url) {
+        const siteData = await fetchSiteContent(url);
+        if (siteData) {
+          // Inject real content into the message
+          const enrichedContent = `${lastUserMessage.content}
+
+---
+ACTUAL SITE CONTENT FETCHED FROM ${url}:
+
+Title: ${siteData.title}
+Meta description: ${siteData.metaDesc}
+
+Page content (first 5000 chars):
+${siteData.content}
+---
+
+Base your entire critique on the above actual content. 
+Do NOT use the domain name or company name to guess what this site does.
+Use only what you can see in the content above.`;
+
+          enrichedMessages = messages.map(m =>
+            m === lastUserMessage
+              ? { ...m, content: enrichedContent }
+              : m
+          );
+        } else {
+          // Couldn't fetch — tell Lyra to be honest about it
+          const unfetchedContent = `${lastUserMessage.content}
+
+---
+NOTE: I attempted to fetch ${url} but could not retrieve the content.
+Do NOT assume or guess what this site is based on the URL or domain name alone.
+Tell the user honestly: "I wasn't able to load this site to review it. Could you paste the homepage text or a screenshot instead?"
+---`;
+          enrichedMessages = messages.map(m =>
+            m === lastUserMessage
+              ? { ...m, content: unfetchedContent }
+              : m
+          );
+        }
+      }
+    }
+
+    // Pass 1 — Lyra generates critique from real content
+    const lyraOutput = await callClaude(LYRA_PROMPT, enrichedMessages, 1800);
 
     // Pass 2 — FOH Manager inspects the plate
-    // Fresh eyes: sees only the output, no context, no conversation
     const fohOutput = await callClaude(FOH_PROMPT, [
       { role: 'user', content: lyraOutput }
-    ], 1600);
+    ], 1800);
 
     res.status(200).json({ text: fohOutput });
 
