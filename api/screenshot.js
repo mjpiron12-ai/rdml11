@@ -1,4 +1,6 @@
-// Lyra's eyes — screenshotone.com backend with auth debug
+// Lyra's eyes — full-page screenshot + page text via screenshotone.com.
+// Auth: x-lyra-key header must match LYRA_SCREENSHOT_SECRET env var.
+// Response: { screenshot: base64JPEG | null, title, text }
 
 const SCREENSHOTONE_ENDPOINT = "https://api.screenshotone.com/take";
 const VIEWPORT_WIDTH = 1280;
@@ -24,7 +26,10 @@ function extractTitleAndText(html, fallback) {
   if (!html) return { title: fallback, text: "" };
   const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   let title = m ? decodeEntities(m[1]).replace(/\s+/g," ").trim() : fallback;
-  let text = html.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ");
+  let text = html
+    .replace(/<script[\s\S]*?<\/script>/gi," ")
+    .replace(/<style[\s\S]*?<\/style>/gi," ")
+    .replace(/<[^>]+>/g," ");
   text = decodeEntities(text).replace(/\s+/g," ").trim().slice(0, MAX_TEXT_CHARS);
   return { title, text };
 }
@@ -49,15 +54,8 @@ export default async function handler(req, res) {
 
   const sent = req.headers["x-lyra-key"];
   const expected = process.env.LYRA_SCREENSHOT_SECRET;
-  
-  // Debug: log first 8 chars of both so we can compare
-  console.log(`[auth] expected_start="${(expected||"").slice(0,8)}" sent_start="${(sent||"").slice(0,8)}" expected_len=${(expected||"").length} sent_len=${(sent||"").length}`);
-
   if (!expected) return res.status(500).json({ error: "LYRA_SCREENSHOT_SECRET missing" });
-  if (!sent || sent !== expected) return res.status(401).json({ 
-    error: "Unauthorized",
-    debug: { expected_start: (expected||"").slice(0,8), sent_start: (sent||"").slice(0,8), expected_len: (expected||"").length, sent_len: (sent||"").length }
-  });
+  if (!sent || sent !== expected) return res.status(401).json({ error: "Unauthorized" });
 
   const apiKey = process.env.SCREENSHOTONE_API_KEY;
   if (!apiKey) return res.status(500).json({ error: "SCREENSHOTONE_API_KEY missing" });
