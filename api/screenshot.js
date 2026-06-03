@@ -2,11 +2,9 @@
 // Matches api/chat.js convention (ESM default-export handler).
 //
 // Auth: x-lyra-key header must match LYRA_SCREENSHOT_SECRET env var.
-// Screenshot: screenshotone /take endpoint, JPEG quality 80, 1280px viewport.
+// Screenshot: screenshotone /take, JPEG quality 80, 1280px viewport.
 // Text/title: parallel native fetch(url) + HTML regex extraction.
 // Response: { screenshot: base64JPEG | null, title, text }
-// Degradation: if screenshotone fails, screenshot is null but title/text
-// still returned; status code stays 200 as long as one source succeeded.
 
 const SCREENSHOTONE_ENDPOINT = "https://api.screenshotone.com/take";
 const VIEWPORT_WIDTH = 1280;
@@ -30,16 +28,6 @@ function isPrivateHost(host) {
   if (/^169\.254\./.test(h)) return true;
   if (h === "metadata.google.internal") return true;
   return false;
-}
-
-async function fetchWithTimeout(url, opts, ms) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), ms);
-  try {
-    return await fetch(url, { ...opts, signal: ctl.signal });
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function decodeEntities(s) {
@@ -67,9 +55,7 @@ function extractTitleAndText(html, fallbackTitle) {
     .replace(/<(br|\/p|\/h[1-6]|\/li|\/div|\/tr)\b[^>]*>/gi, "\n")
     .replace(/<[^>]+>/g, " ");
   text = decodeEntities(text).replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-  if (text.length > MAX_TEXT_CHARS) {
-    text = text.slice(0, MAX_TEXT_CHARS) + "\n\u2026[truncated]";
-  }
+  if (text.length > MAX_TEXT_CHARS) text = text.slice(0, MAX_TEXT_CHARS) + "\n\u2026[truncated]";
   return { title, text };
 }
 
@@ -80,54 +66,80 @@ async function callScreenshotOne(url, apiKey) {
     full_page: "true",
     format: "jpg",
     image_quality: "80",
+    response_type: "by_format",
     viewport_width: String(VIEWPORT_WIDTH),
     viewport_height: String(VIEWPORT_HEIGHT),
-    block_ads: "true",
-    block_cookie_banners: "true",
-    cache: "false",
   });
-  const r = await fetchWithTimeout(
-    `${SCREENSHOTONE_ENDPOINT}?${params}`,
-    { method: "GET" },
-    SCREENSHOTONE_TIMEOUT_MS
-  );
-  if (!r.ok) {
-    let body = "";
-    try { body = (await r.text()).slice(0, 400); } catch (_) {}
-    throw new Error(`screenshotone ${r.status}: ${body || r.statusText}`);
+
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), SCREENSHOTONE_TIMEOUT_MS);
+
+  try {
+    const r = await fetch(`${SCREENSHOTONE_ENDPOINT}?${params}`, {
+      method: "GET",
+      signal: ctl.signal,
+    });
+
+    const status = r.status;
+    const ct = r.headers.get("content-type") || "";
+    const cl = r.headers.get("content-length") || "";
+    const loc = r.headers.get("location") || "";
+    console.log(`[screenshot] screenshotone status=${status} ct=${ct} cl=${cl} loc=${loc}`);
+
+    if (!r.ok) {
+      let body = "";
+      try { body = (await r.text()).slice(0, 600); } catch (_) {}
+      throw new Error(`screenshotone HTTP ${status}: ${body || r.statusText}`);
+    }
+
+    if (!ct.toLowerCase().startsWith("image/")) {
+      let body = "";
+      try { body = (await r.text()).slice(0, 600); } catch (_) {}
+      throw new Error(`screenshotone non-image content-type "${ct}". Body: ${body}`);
+    }
+
+    const ab = await r.arrayBuffer();
+    const buf = Buffer.from(ab);
+    console.log(`[screenshot] bytes read=${buf.length}`);
+
+    if (buf.length === 0) {
+      throw new Error("screenshotone returned 200 image/jpeg with 0-byte body");
+    }
+
+    return buf.toString("base64");
+  } finally {
+    clearTimeout(timer);
   }
-  const buf = Buffer.from(await r.arrayBuffer());
-  return buf.toString("base64");
 }
 
 async function fetchHtml(url) {
-  const r = await fetchWithTimeout(
-    url,
-    {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), HTML_FETCH_TIMEOUT_MS);
+  try {
+    const r = await fetch(url, {
       headers: {
         "User-Agent": REAL_UA,
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
       },
       redirect: "follow",
-    },
-    HTML_FETCH_TIMEOUT_MS
-  );
-  if (!r.ok) throw new Error(`html ${r.status} ${r.statusText}`);
-  const reader = r.body.getReader();
-  const chunks = [];
-  let total = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_HTML_BYTES) {
-      try { reader.cancel(); } catch (_) {}
-      break;
+      signal: ctl.signal,
+    });
+    if (!r.ok) throw new Error(`html HTTP ${r.status}`);
+    const reader = r.body.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_HTML_BYTES) { try { reader.cancel(); } catch (_) {} break; }
+      chunks.push(value);
     }
-    chunks.push(value);
+    return Buffer.concat(chunks.map(c => Buffer.from(c))).toString("utf8");
+  } finally {
+    clearTimeout(timer);
   }
-  return Buffer.concat(chunks.map(c => Buffer.from(c))).toString("utf8");
 }
 
 export default async function handler(req, res) {
@@ -138,32 +150,19 @@ export default async function handler(req, res) {
 
   const sent = req.headers["x-lyra-key"];
   const expected = process.env.LYRA_SCREENSHOT_SECRET;
-  if (!expected) {
-    return res.status(500).json({ error: "Server misconfigured: LYRA_SCREENSHOT_SECRET missing" });
-  }
-  if (!sent || sent !== expected) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+  if (!expected) return res.status(500).json({ error: "LYRA_SCREENSHOT_SECRET missing" });
+  if (!sent || sent !== expected) return res.status(401).json({ error: "Unauthorized" });
 
   const apiKey = process.env.SCREENSHOTONE_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "Server misconfigured: SCREENSHOTONE_API_KEY missing" });
-  }
+  if (!apiKey) return res.status(500).json({ error: "SCREENSHOTONE_API_KEY missing" });
 
   const { url } = req.body || {};
-  if (!url || typeof url !== "string") {
-    return res.status(400).json({ error: "Body must include { url: string }" });
-  }
+  if (!url || typeof url !== "string") return res.status(400).json({ error: "url required" });
 
   let parsed;
-  try { parsed = new URL(url); }
-  catch { return res.status(400).json({ error: "Invalid URL" }); }
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    return res.status(400).json({ error: "Only http(s) URLs allowed" });
-  }
-  if (isPrivateHost(parsed.hostname)) {
-    return res.status(400).json({ error: "Private/internal addresses are blocked" });
-  }
+  try { parsed = new URL(url); } catch { return res.status(400).json({ error: "Invalid URL" }); }
+  if (!["http:", "https:"].includes(parsed.protocol)) return res.status(400).json({ error: "http(s) only" });
+  if (isPrivateHost(parsed.hostname)) return res.status(400).json({ error: "Private addresses blocked" });
 
   const [shotResult, htmlResult] = await Promise.allSettled([
     callScreenshotOne(url, apiKey),
@@ -174,7 +173,7 @@ export default async function handler(req, res) {
   if (shotResult.status === "fulfilled") {
     screenshot = shotResult.value;
   } else {
-    console.warn("[screenshot] screenshotone failed:", shotResult.reason?.message);
+    console.warn("[screenshot] failed:", shotResult.reason?.message);
   }
 
   let title = parsed.hostname;
@@ -184,7 +183,7 @@ export default async function handler(req, res) {
     title = ext.title;
     text = ext.text;
   } else {
-    console.warn("[screenshot] html fetch failed:", htmlResult.reason?.message);
+    console.warn("[html] failed:", htmlResult.reason?.message);
   }
 
   return res.status(200).json({ screenshot, title, text });
