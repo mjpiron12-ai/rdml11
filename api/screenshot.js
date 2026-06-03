@@ -1,5 +1,4 @@
-// Lyra's eyes — screenshotone.com backend
-// AUTH TEMPORARILY DISABLED FOR TESTING
+// Lyra's eyes — screenshotone.com backend with auth debug
 
 const SCREENSHOTONE_ENDPOINT = "https://api.screenshotone.com/take";
 const VIEWPORT_WIDTH = 1280;
@@ -25,46 +24,40 @@ function extractTitleAndText(html, fallback) {
   if (!html) return { title: fallback, text: "" };
   const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   let title = m ? decodeEntities(m[1]).replace(/\s+/g," ").trim() : fallback;
-  let text = html
-    .replace(/<script[\s\S]*?<\/script>/gi," ")
-    .replace(/<style[\s\S]*?<\/style>/gi," ")
-    .replace(/<[^>]+>/g," ");
+  let text = html.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ");
   text = decodeEntities(text).replace(/\s+/g," ").trim().slice(0, MAX_TEXT_CHARS);
   return { title, text };
 }
 
 async function callScreenshotOne(url, apiKey) {
   const params = new URLSearchParams({
-    access_key: apiKey,
-    url,
-    full_page: "true",
-    format: "jpg",
-    image_quality: "80",
+    access_key: apiKey, url,
+    full_page: "true", format: "jpg", image_quality: "80",
     response_type: "by_format",
-    viewport_width: String(VIEWPORT_WIDTH),
-    viewport_height: String(VIEWPORT_HEIGHT),
+    viewport_width: String(VIEWPORT_WIDTH), viewport_height: String(VIEWPORT_HEIGHT),
   });
   const r = await fetch(`${SCREENSHOTONE_ENDPOINT}?${params}`);
   const ct = r.headers.get("content-type") || "";
-  console.log(`[screenshot] status=${r.status} ct=${ct}`);
-  if (!r.ok) {
-    const body = await r.text();
-    throw new Error(`screenshotone ${r.status}: ${body.slice(0,400)}`);
-  }
-  if (!ct.startsWith("image/")) {
-    const body = await r.text();
-    throw new Error(`non-image response: ${body.slice(0,400)}`);
-  }
+  if (!r.ok) { const b = await r.text(); throw new Error(`screenshotone ${r.status}: ${b.slice(0,400)}`); }
+  if (!ct.startsWith("image/")) { const b = await r.text(); throw new Error(`non-image: ${b.slice(0,400)}`); }
   const buf = Buffer.from(await r.arrayBuffer());
-  console.log(`[screenshot] bytes=${buf.length}`);
   return buf.toString("base64");
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method !== "POST") { res.setHeader("Allow","POST"); return res.status(405).json({error:"Method not allowed"}); }
+
+  const sent = req.headers["x-lyra-key"];
+  const expected = process.env.LYRA_SCREENSHOT_SECRET;
+  
+  // Debug: log first 8 chars of both so we can compare
+  console.log(`[auth] expected_start="${(expected||"").slice(0,8)}" sent_start="${(sent||"").slice(0,8)}" expected_len=${(expected||"").length} sent_len=${(sent||"").length}`);
+
+  if (!expected) return res.status(500).json({ error: "LYRA_SCREENSHOT_SECRET missing" });
+  if (!sent || sent !== expected) return res.status(401).json({ 
+    error: "Unauthorized",
+    debug: { expected_start: (expected||"").slice(0,8), sent_start: (sent||"").slice(0,8), expected_len: (expected||"").length, sent_len: (sent||"").length }
+  });
 
   const apiKey = process.env.SCREENSHOTONE_API_KEY;
   if (!apiKey) return res.status(500).json({ error: "SCREENSHOTONE_API_KEY missing" });
